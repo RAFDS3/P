@@ -1,0 +1,67 @@
+name: Build APK from ZIP
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ekstrak ZIP
+        run: |
+          ZIP=$(ls -1 *.zip 2>/dev/null | head -n 1)
+          if [ -z "$ZIP" ]; then echo "Tidak ada file .zip di root repo"; exit 1; fi
+          mkdir -p src_extracted
+          unzip -q -o "$ZIP" -d src_extracted
+          SETTINGS=$(find src_extracted -name settings.gradle.kts | head -n 1)
+          if [ -z "$SETTINGS" ]; then echo "settings.gradle.kts tidak ditemukan di dalam zip"; exit 1; fi
+          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        timeout-minutes: 5
+        with:
+          gradle-version: 8.9
+          cache-disabled: true
+
+      - name: Build debug APK
+        timeout-minutes: 15
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          gradle assembleDebug --console=plain --warning-mode=none 2>&1 | tee build.log
+
+      - name: Tampilkan error di ringkasan
+        if: failure()
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          {
+            echo "## Error kompilasi"
+            echo '```'
+            grep -E "^e: |What went wrong" -A3 build.log | head -60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Simpan log build
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ env.PROJECT_DIR }}/build.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asisten-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
