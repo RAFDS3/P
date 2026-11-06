@@ -1,0 +1,87 @@
+name: Build Update (ZIP -> APK -> Release)
+
+on:
+  push:
+    branches: [main]
+    paths: ['*.zip']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pilih dan ekstrak ZIP terbaru
+        run: |
+          ZIP=$(git log -1 --name-only --diff-filter=AM --pretty=format: -- '*.zip' | grep -m1 '\.zip$' || true)
+          if [ -z "$ZIP" ]; then ZIP=$(ls -1 *.zip 2>/dev/null | head -n 1); fi
+          if [ -z "$ZIP" ]; then echo "Tidak ada file .zip di root repo"; exit 1; fi
+          echo "Memakai: $ZIP"
+          rm -rf src_extracted && mkdir -p src_extracted
+          unzip -q -o "$ZIP" -d src_extracted
+          SETTINGS=$(find src_extracted -name settings.gradle.kts | head -n 1)
+          if [ -z "$SETTINGS" ]; then echo "settings.gradle.kts tidak ditemukan di dalam zip"; exit 1; fi
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$(dirname "$SETTINGS")" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        timeout-minutes: 5
+        with:
+          gradle-version: 8.9
+          cache-disabled: true
+
+      - name: Build debug APK
+        timeout-minutes: 20
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --console=plain --warning-mode=none 2>&1 | tee build.log
+
+      - name: Tampilkan error di ringkasan
+        if: failure()
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          {
+            echo "## Error kompilasi"
+            echo '```'
+            grep -E "^e: |What went wrong" -A3 build.log | head -60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Simpan log build
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ env.PROJECT_DIR }}/build.log
+
+      - name: Rilis APK (bisa diunduh langsung dari halaman Releases)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(ls "$PROJECT_DIR"/app/build/outputs/apk/debug/*.apk | head -n 1)
+          cp "$APK" Asisten.apk
+          gh release create "build-${{ github.run_number }}" Asisten.apk \
+            --title "Asisten build #${{ github.run_number }}" \
+            --notes "APK otomatis dari $ZIP" --latest
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asisten-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
